@@ -1,0 +1,4 @@
+.private/
+qrcodes/
+output/
+__pycache__/
