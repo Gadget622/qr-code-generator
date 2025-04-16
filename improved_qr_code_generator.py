@@ -342,63 +342,34 @@ class CSVProcessor:
 
 
 class QRCodeGenerator:
-    """Generate QR codes from URLs and manage their data."""
+    """Generate QR codes from URLs."""
     
-    def __init__(self, config: Dict[str, Any], csv_processor: CSVProcessor):
+    def __init__(self, config: Dict[str, Any], url_manager=None):
         """
-        Initialize the QRCodeGenerator with configuration and CSV processor.
+        Initialize the QRCodeGenerator with configuration.
         
         Args:
             config: Configuration dictionary
-            csv_processor: CSV processor for managing URL data
+            url_manager: Optional URL manager instance
         """
         self.config = config
-        self.csv_processor = csv_processor
         self.error_correction = getattr(qrcode.constants, 
-                                     config.get('qr_error_correction', 'ERROR_CORRECT_L'))
+                                      config.get('qr_error_correction', 'ERROR_CORRECT_L'))
         self.box_size = config.get('qr_box_size', 10)
         self.border = config.get('qr_border', 4)
+        self.url_manager = url_manager
     
-    def generate_binary_data(self, url: str) -> Tuple[int, str]:
+    def generate_qr_code(self, url: str, output_path: str, filename: str = "qrcode") -> Dict[str, str]:
         """
-        Generate binary data for a QR code.
+        Generate QR code for a URL and save as image and binary file.
         
         Args:
             url: URL to encode in QR code
+            output_path: Directory to save the QR code files
+            filename: Base filename for output files
             
         Returns:
-            Tuple of (version, binary_data)
-        """
-        # Create QR code
-        qr = qrcode.QRCode(
-            version=None,  # Auto-determine
-            error_correction=self.error_correction,
-            box_size=self.box_size,
-            border=self.border,
-        )
-        qr.add_data(url)
-        qr.make(fit=True)
-        
-        # Generate binary representation
-        data = qr.get_matrix()
-        binary_data = ""
-        for row in data:
-            for cell in row:
-                binary_data += "1" if cell else "0"
-        
-        return qr.version, binary_data
-    
-    def generate_image(self, url: str, output_path: str, filename: str = "qrcode") -> str:
-        """
-        Generate QR code image for a URL.
-        
-        Args:
-            url: URL to encode in QR code
-            output_path: Directory to save the QR code image
-            filename: Base filename for output file
-            
-        Returns:
-            Path to the generated image
+            Dictionary containing paths to generated files
         """
         os.makedirs(output_path, exist_ok=True)
         
@@ -418,88 +389,34 @@ class QRCodeGenerator:
         image_path = os.path.join(output_path, f"{filename}.png")
         img.save(image_path)
         
-        return image_path
+        # Get and save binary data
+        binary_data = self._get_binary_data(qr)
+        binary_path = os.path.join(output_path, f"{filename}.bin")
+        self._save_binary_data(qr, url, binary_path)
+        
+        # Save URL to markdown file
+        url_path = os.path.join(output_path, "url.md")
+        with open(url_path, 'w', encoding='utf-8') as f:
+            f.write(f"# QR Code Link\n\n{url}\n")
+        
+        # Update URL manager if available
+        if self.url_manager:
+            self.url_manager.mark_as_processed(url, qr.version, binary_data)
+        
+        return {
+            'image': image_path,
+            'binary': binary_path,
+            'url': url_path
+        }
     
-    def process_urls(self, output_dir: str) -> List[Dict[str, str]]:
-        """
-        Process all URLs in the CSV and generate QR code images.
-        
-        Args:
-            output_dir: Base directory for QR code images
-            
-        Returns:
-            List of dictionaries with URL data and image paths
-        """
-        urls_data = self.csv_processor.get_urls()
-        processed_data = []
-        
-        for data in urls_data:
-            url = data['url']
-            
-            # Generate binary data if not already present
-            if not data['binary_data'] or not data['version']:
-                version, binary_data = self.generate_binary_data(url)
-                self.csv_processor.update_qr_data(url, version, binary_data)
-            
-            # Create directory for this URL
-            dir_name = self.sanitize_filename(url)
-            url_dir = os.path.join(output_dir, dir_name)
-            
-            # Generate image
-            image_path = self.generate_image(url, url_dir)
-            
-            # Save URL to markdown file
-            url_path = os.path.join(url_dir, "url.md")
-            with open(url_path, 'w', encoding='utf-8') as f:
-                f.write(f"# QR Code Link\n\n{url}\n")
-            
-            processed_data.append({
-                'url': url,
-                'directory': url_dir,
-                'image_path': image_path,
-                'url_file': url_path,
-                'timestamp': data['timestamp'],
-                'version': data['version']
-            })
-        
-        return processed_data
-    
-    def sanitize_filename(self, url: str) -> str:
-        """
-        Convert URL to a safe directory name.
-        
-        Args:
-            url: URL to sanitize
-            
-        Returns:
-            Sanitized directory name
-        """
-        # Extract domain for the start of the name
-        parsed_url = urlparse(url)
-        domain = parsed_url.netloc
-        
-        # Remove common prefixes
-        path = parsed_url.path
-        path = path.strip('/')
-        path = path.replace('www.', '')
-        
-        # Combine parts
-        name = f"{domain}_{path}"
-        
-        # Replace invalid characters
-        invalid_chars = r'[<>:"/\\|?*]'
-        name = re.sub(invalid_chars, '_', name)
-        
-        # Truncate if too long
-        if len(name) > 100:
-            name = name[:97] + "..."
-        
-        # Ensure uniqueness if the name is empty or too generic
-        if not name or name == '_':
-            name = f"url_{uuid.uuid4().hex[:8]}"
-            
-        return name
-
+    def _get_binary_data(self, qr: qrcode.QRCode) -> str:
+        """Extract binary data from QR code."""
+        data = qr.get_matrix()
+        binary_data = ""
+        for row in data:
+            for cell in row:
+                binary_data += "1" if cell else "0"
+        return binary_data
 
 class PDFGenerator:
     """Generate PDF with QR codes, 4 codes per page."""
@@ -590,7 +507,7 @@ class PDFGenerator:
             print(f"Error creating PDF: {e}")
             return None
 
-
+from url_manager import URLManager
 class LinkProcessorApp:
     """Main application class for processing links and generating outputs."""
     
@@ -632,18 +549,177 @@ class LinkProcessorApp:
         
         return default_config
     
-    def process_file(self, input_file: str, output_dir: str = "output") -> Dict[str, Any]:
+    def process_file(self, input_file: str, output_dir: str = "output", url_manager=None) -> Dict[str, Any]:
         """
         Process input file to extract links and generate QR codes.
         
         Args:
             input_file: Path to input file
             output_dir: Base directory for outputs
+            url_manager: Optional URL manager instance
             
         Returns:
             Dictionary with processing results
         """
         print(f"Processing file: {input_file}")
+        
+        # Helper function to generate title from URL
+        def generate_title(url: str) -> str:
+            """
+            Generate a descriptive title for a URL.
+            
+            Args:
+                url: URL to generate title for
+                
+            Returns:
+                Generated title
+            """
+            if not self.config.get('generate_descriptive_titles', True):
+                return url
+            
+            # Extract domain and path components
+            from urllib.parse import urlparse
+            parsed_url = urlparse(url)
+            domain = parsed_url.netloc.replace('www.', '')
+            
+            path_parts = [p for p in parsed_url.path.split('/') if p]
+            
+            # Format title
+            if not path_parts:
+                return domain
+            
+            # Use last meaningful path component as title
+            import re
+            slug = path_parts[-1].replace('-', ' ').replace('_', ' ')
+            
+            # Clean up the slug
+            slug = re.sub(r'\.\w+$', '', slug)  # Remove file extensions
+            
+            if not slug:
+                return domain
+            
+            return f"{slug.title()} - {domain}"
+        
+        # Create or use URL manager
+        if not url_manager:
+            # We need to define URLManager class or import it
+            class URLManager:
+                """Manage URLs and their associated metadata to prevent duplicates"""
+                
+                def __init__(self):
+                    """Initialize the URL manager with empty collections"""
+                    self.urls = {}  # Dictionary mapping URLs to their metadata
+                    self.url_hashes = set()  # Set of URL hashes for quick lookup
+                    from datetime import datetime
+                    self.datetime = datetime
+                    import uuid
+                    self.uuid = uuid
+                
+                def add_url(self, url: str) -> Dict:
+                    """
+                    Add a URL to the manager if it doesn't exist.
+                    
+                    Args:
+                        url: The URL to add
+                        
+                    Returns:
+                        Dictionary with URL metadata
+                    """
+                    # Create a unique hash for the URL
+                    url_hash = self._hash_url(url)
+                    
+                    # Check if URL already exists
+                    if url_hash in self.url_hashes:
+                        return self.urls[url]
+                    
+                    # Add new URL
+                    url_id = str(self.uuid.uuid4())
+                    from urllib.parse import urlparse
+                    parsed_url = urlparse(url)
+                    
+                    metadata = {
+                        'url': url,
+                        'id': url_id,
+                        'domain': parsed_url.netloc,
+                        'path': parsed_url.path,
+                        'query': parsed_url.query,
+                        'timestamp': None,  # Will be set when QR code is generated
+                        'version': None,    # Will be set when QR code is generated
+                        'qr_data': None,    # Will be set when QR code is generated
+                        'processed': False  # Flag to indicate if QR code has been generated
+                    }
+                    
+                    self.urls[url] = metadata
+                    self.url_hashes.add(url_hash)
+                    
+                    return metadata
+                
+                def _hash_url(self, url: str) -> str:
+                    """
+                    Create a hash of the URL for duplicate detection.
+                    
+                    Args:
+                        url: The URL to hash
+                        
+                    Returns:
+                        A string hash of the URL
+                    """
+                    # This is a simple hash, but we could use a more robust method
+                    return url
+                
+                def get_unprocessed_urls(self) -> List[Dict]:
+                    """
+                    Get all URLs that haven't been processed yet.
+                    
+                    Returns:
+                        List of URL metadata dictionaries
+                    """
+                    return [metadata for url, metadata in self.urls.items() if not metadata['processed']]
+                
+                def mark_as_processed(self, url: str, version: int, qr_data: str) -> None:
+                    """
+                    Mark a URL as processed with QR code data.
+                    
+                    Args:
+                        url: The URL that was processed
+                        version: QR code version number
+                        qr_data: Binary QR code data
+                    """
+                    if url in self.urls:
+                        self.urls[url]['processed'] = True
+                        self.urls[url]['timestamp'] = self.datetime.now().isoformat()
+                        self.urls[url]['version'] = version
+                        self.urls[url]['qr_data'] = qr_data
+                
+                def export_to_csv(self, output_path: str) -> str:
+                    """
+                    Export all URLs and their metadata to a CSV file.
+                    
+                    Args:
+                        output_path: Directory to save the CSV file
+                        
+                    Returns:
+                        Path to the created CSV file
+                    """
+                    import os
+                    import csv
+                    csv_path = os.path.join(output_path, "urls.csv")
+                    
+                    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+                        writer = csv.writer(f)
+                        writer.writerow(['url', 'timestamp', 'version', 'binary_data'])
+                        
+                        for url, metadata in self.urls.items():
+                            writer.writerow([
+                                url,
+                                metadata.get('timestamp', ''),
+                                metadata.get('version', ''),
+                                metadata.get('qr_data', '')
+                            ])
+                    
+                    return csv_path
+                    
+            url_manager = URLManager()
         
         # Extract base filename without extension
         base_filename = os.path.splitext(os.path.basename(input_file))[0]
@@ -656,40 +732,121 @@ class LinkProcessorApp:
         links = self.link_extractor.extract_from_file(input_file)
         print(f"Found {len(links)} unique links")
         
-        # Create CSV processor
-        csv_processor = CSVProcessor(file_output_dir)
+        # Add URLs to manager
+        for url in links:
+            url_manager.add_url(url)
         
-        # Add links to CSV
-        new_links = csv_processor.add_urls(links)
-        print(f"Added {len(new_links)} new unique links to CSV")
+        # Get unprocessed URLs
+        unprocessed_urls = url_manager.get_unprocessed_urls()
+        print(f"Processing {len(unprocessed_urls)} new links")
         
-        # Create QR code generator
-        qr_generator = QRCodeGenerator(self.config, csv_processor)
+        # Define a modified QR code generator that works with our URL manager
+        class EnhancedQRGenerator(QRCodeGenerator):
+            def __init__(self, config, url_manager):
+                super().__init__(config)
+                self.url_manager = url_manager
+                
+            def generate_qr_code(self, url, output_path, filename="qrcode"):
+                os.makedirs(output_path, exist_ok=True)
+                
+                # Create QR code
+                qr = qrcode.QRCode(
+                    version=None,  # Auto-determine
+                    error_correction=self.error_correction,
+                    box_size=self.box_size,
+                    border=self.border,
+                )
+                qr.add_data(url)
+                qr.make(fit=True)
+                
+                img = qr.make_image(fill_color="black", back_color="white")
+                
+                # Save image
+                image_path = os.path.join(output_path, f"{filename}.png")
+                img.save(image_path)
+                
+                # Get binary data
+                data = qr.get_matrix()
+                binary_data = ""
+                for row in data:
+                    for cell in row:
+                        binary_data += "1" if cell else "0"
+                
+                # Save binary data
+                binary_path = os.path.join(output_path, f"{filename}.bin")
+                additional_info = f"Link: {url}\nVersion: {qr.version}\n"
+                data_file_content = additional_info.encode('utf-8') + binary_data.encode('utf-8')
+                
+                with open(binary_path, "wb") as f:
+                    f.write(data_file_content)
+                
+                # Save URL to markdown file
+                url_path = os.path.join(output_path, "url.md")
+                with open(url_path, 'w', encoding='utf-8') as f:
+                    f.write(f"# QR Code Link\n\n{url}\n")
+                
+                # Update URL manager
+                self.url_manager.mark_as_processed(url, qr.version, binary_data)
+                
+                return {
+                    'image': image_path,
+                    'binary': binary_path,
+                    'url': url_path
+                }
         
-        # Process URLs and generate images
-        processed_data = qr_generator.process_urls(file_output_dir)
-        print(f"Generated {len(processed_data)} QR codes")
+        # Create QR generator with URL manager
+        qr_generator = EnhancedQRGenerator(self.config, url_manager)
         
-        # Generate PDF if configured
-        pdf_path = None
-        if self.config.get('output_pdf', True):
-            pdf_generator = PDFGenerator(self.config)
-            pdf_path = pdf_generator.create_pdf(processed_data, file_output_dir)
-            if pdf_path:
-                print(f"Created PDF with QR codes: {pdf_path}")
+        # Process each unprocessed link
+        qr_data = []
+        for metadata in unprocessed_urls:
+            url = metadata['url']
+            
+            # Use URL ID for directory name to ensure uniqueness
+            dir_name = f"url_{metadata['id']}"
+            url_dir = os.path.join(file_output_dir, dir_name)
+            
+            # Generate QR code
+            files = qr_generator.generate_qr_code(url, url_dir)
+            
+            # Generate title using our local function
+            title = generate_title(url)
+            
+            qr_data.append({
+                'url': url,
+                'title': title,
+                'directory': url_dir,
+                'files': files,
+                'metadata': metadata
+            })
         
-        # Return results
-        return {
+        # Export URL data to CSV
+        csv_path = url_manager.export_to_csv(file_output_dir)
+        print(f"URL data exported to: {csv_path}")
+        
+        # Generate outputs if configured and links exist
+        results = {
             'input_file': input_file,
             'output_dir': file_output_dir,
             'links_found': len(links),
-            'new_links': len(new_links),
-            'qr_data': processed_data,
-            'outputs': {
-                'csv': csv_processor.csv_path,
-                'pdf': pdf_path
-            }
+            'new_links_processed': len(unprocessed_urls),
+            'qr_data': qr_data,
+            'url_data_csv': csv_path,
+            'outputs': {}
         }
+        
+        if qr_data:
+            if self.config.get('output_pptx', True):
+                pptx_path = self.output_generator.create_powerpoint(qr_data, file_output_dir)
+                if pptx_path:
+                    results['outputs']['pptx'] = pptx_path
+            
+            if self.config.get('output_pdf', True):
+                pdf_path = self.output_generator.create_pdf(qr_data, file_output_dir)
+                if pdf_path:
+                    results['outputs']['pdf'] = pdf_path
+        
+        return results
 
 
 def main():
