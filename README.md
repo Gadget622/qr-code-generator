@@ -11,11 +11,12 @@ A hypermodular tool for extracting links from various file types and generating 
   - PDF files
   - Word documents (.docx)
   - HTML files
-- Generate QR codes for each link
+- Generate QR codes for each unique link
+- CSV-first approach prevents link duplication
+- Timestamp tracking for all URL extractions
 - Organize outputs in a structured directory format
 - Generate multiple output formats:
-  - PowerPoint presentation with clickable links
-  - PDF document
+  - PDF document with 4 QR codes per page
   - Raw QR code files (PNG and binary format)
 - Configurable via YAML configuration file
 
@@ -44,25 +45,26 @@ A hypermodular tool for extracting links from various file types and generating 
 Process a file and generate QR codes:
 
 ```bash
-python link_extractor_qr_generator.py path/to/your/file.txt
+python improved_qr_generator.py path/to/your/file.txt
 ```
 
 This will:
 1. Extract all links from the file
-2. Generate QR codes for each link
-3. Save them in the `output/` directory
-4. Create a PowerPoint presentation and PDF if the required libraries are installed
+2. Store unique links in a CSV with timestamps
+3. Generate QR codes for each link
+4. Save them in the `output/` directory
+5. Create a PDF with 4 QR codes per page
 
 ### Specifying Output Directory
 
 ```bash
-python link_extractor_qr_generator.py path/to/your/file.txt -o custom_output_dir
+python improved_qr_generator.py path/to/your/file.txt -o custom_output_dir
 ```
 
 ### Using Custom Configuration
 
 ```bash
-python link_extractor_qr_generator.py path/to/your/file.txt -c custom_config.yaml
+python improved_qr_generator.py path/to/your/file.txt -c custom_config.yaml
 ```
 
 ## Configuration
@@ -71,7 +73,6 @@ The default configuration can be overridden by creating a custom YAML file. Here
 
 ```yaml
 # Output Options
-output_pptx: true    # Generate PowerPoint presentation
 output_pdf: true     # Generate PDF document
 output_raw: true     # Generate raw QR code files in directories
 
@@ -91,6 +92,7 @@ The tool creates the following directory structure:
 ```
 output/
 └── filename/                     # Based on input filename
+    ├── urls.csv                  # Master CSV with all unique URLs and timestamps
     ├── domain_path1/             # Sanitized directory name based on URL
     │   ├── qrcode.bin            # Binary data
     │   ├── qrcode.png            # QR code image
@@ -99,9 +101,21 @@ output/
     │   ├── qrcode.bin
     │   ├── qrcode.png
     │   └── url.md
-    ├── qr_codes.pptx             # PowerPoint presentation (if enabled)
-    └── qr_codes.pdf              # PDF document (if enabled)
+    └── qr_codes.pdf              # PDF document (4 codes per page)
 ```
+
+## CSV Format
+
+The master CSV file includes:
+- URL: The unique link extracted
+- Timestamp: When the URL was first extracted
+- Version: QR code version information
+- Binary data: Binary representation of the QR code
+
+This CSV-first approach ensures:
+- No duplicate links across multiple runs
+- Consistent QR code generation
+- Trackable history of each URL
 
 ## Dependencies
 
@@ -111,11 +125,19 @@ output/
   - PyYAML: For configuration file handling
 
 - **Optional:**
-  - python-pptx: For PowerPoint generation
   - fpdf: For PDF generation
   - PyPDF2: For extracting text from PDFs
   - python-docx: For processing Word documents
   - pandas: For processing CSV files
+  - beautifulsoup4: For HTML processing
+
+## Batch Processing
+
+To process multiple files, use the batch processor:
+
+```bash
+python batch_processor.py directory_with_files
+```
 
 ## License
 

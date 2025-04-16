@@ -1,31 +1,24 @@
 #!/usr/bin/env python3
 """
-Link Extractor and QR Code Generator
+Improved Link Extractor and QR Code Generator
 
-This script extracts links from various text-based files and generates QR codes,
-organizing them in a structured directory format with multiple output options.
+This script extracts links from various text-based files, stores them in a CSV,
+generates QR codes, and creates a PDF with 4 codes per page.
 """
 
 import os
 import re
+import csv
 import yaml
-import json
 import qrcode
 import argparse
-import shutil
-from pathlib import Path
+import datetime
 from urllib.parse import urlparse
 import uuid
-from typing import List, Dict, Optional, Set, Any, Union
+from typing import List, Dict, Optional, Set, Any, Tuple
+from pathlib import Path
 
 # Import optional modules with error handling
-try:
-    from pptx import Presentation
-    from pptx.util import Inches, Pt
-    PPTX_AVAILABLE = True
-except ImportError:
-    PPTX_AVAILABLE = False
-
 try:
     from fpdf import FPDF
     PDF_AVAILABLE = True
@@ -206,7 +199,9 @@ class LinkExtractor:
             try:
                 yaml_data = yaml.safe_load(content)
                 if yaml_data:
-                    self._find_urls_in_structure(yaml_data, urls)
+                    for key, value in yaml_data.items():
+                        if isinstance(value, str):
+                            urls.update(self._find_urls(value))
             except Exception as yaml_e:
                 print(f"Error parsing YAML structure in {file_path}: {yaml_e}")
                 # Already found URLs from raw text, so continue
@@ -222,65 +217,188 @@ class LinkExtractor:
             with open(file_path, 'r', encoding='utf-8', errors='ignore') as file:
                 content = file.read()
                 
-            # First, try to find URLs in the raw text
+            # Just find URLs in the raw text
             urls = self._find_urls(content)
-            
-            # Then try to parse JSON and search for URLs in values
-            try:
-                json_data = json.loads(content)
-                self._find_urls_in_structure(json_data, urls)
-            except Exception as json_e:
-                print(f"Error parsing JSON structure in {file_path}: {json_e}")
-                # Already found URLs from raw text, so continue
-                
             return urls
         except Exception as e:
             print(f"Error processing JSON file {file_path}: {e}")
             return set()
-    
-    def _find_urls_in_structure(self, data: Any, urls: Set[str]) -> None:
-        """Recursively search for URLs in nested data structures (dict, list, etc.)."""
-        if isinstance(data, dict):
-            for value in data.values():
-                self._find_urls_in_structure(value, urls)
-        elif isinstance(data, list):
-            for item in data:
-                self._find_urls_in_structure(item, urls)
-        elif isinstance(data, str):
-            urls.update(self._find_urls(data))
     
     def _find_urls(self, text: str) -> Set[str]:
         """Find all URLs in a text string."""
         return set(self.url_pattern.findall(text))
 
 
-class QRCodeGenerator:
-    """Generate QR codes from URLs."""
+class CSVProcessor:
+    """Process and manage URLs in CSV format with timestamps."""
     
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, output_path: str):
         """
-        Initialize the QRCodeGenerator with configuration.
+        Initialize the CSV processor.
+        
+        Args:
+            output_path: Directory to save the CSV file
+        """
+        self.output_path = output_path
+        self.csv_path = os.path.join(output_path, "urls.csv")
+        self.urls = set()  # For tracking unique URLs
+        
+    def add_urls(self, urls: Set[str]) -> List[str]:
+        """
+        Add unique URLs to the CSV.
+        
+        Args:
+            urls: Set of URLs to add
+            
+        Returns:
+            List of newly added URLs
+        """
+        # Create directory if it doesn't exist
+        os.makedirs(self.output_path, exist_ok=True)
+        
+        # Read existing URLs if file exists
+        existing_urls = set()
+        if os.path.exists(self.csv_path):
+            with open(self.csv_path, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    existing_urls.add(row['url'])
+        
+        # Combine with already tracked URLs
+        self.urls.update(existing_urls)
+        
+        # Find new URLs
+        new_urls = [url for url in urls if url not in self.urls]
+        timestamp = datetime.datetime.now().isoformat()
+        
+        # Add new URLs to CSV
+        file_exists = os.path.exists(self.csv_path)
+        with open(self.csv_path, 'a', encoding='utf-8', newline='') as f:
+            fieldnames = ['url', 'timestamp', 'version', 'binary_data']
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            
+            if not file_exists:
+                writer.writeheader()
+            
+            for url in new_urls:
+                writer.writerow({
+                    'url': url,
+                    'timestamp': timestamp,
+                    'version': '',  # Will be filled later
+                    'binary_data': ''  # Will be filled later
+                })
+        
+        # Add new URLs to the tracking set
+        self.urls.update(new_urls)
+        
+        return new_urls
+    
+    def update_qr_data(self, url: str, version: int, binary_data: str) -> None:
+        """
+        Update QR code data for a URL in the CSV.
+        
+        Args:
+            url: URL to update
+            version: QR code version
+            binary_data: Binary representation of QR code
+        """
+        if not os.path.exists(self.csv_path):
+            return
+        
+        # Read all rows
+        rows = []
+        with open(self.csv_path, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if row['url'] == url:
+                    row['version'] = str(version)
+                    row['binary_data'] = binary_data
+                rows.append(row)
+        
+        # Write back all rows
+        with open(self.csv_path, 'w', encoding='utf-8', newline='') as f:
+            fieldnames = ['url', 'timestamp', 'version', 'binary_data']
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(rows)
+    
+    def get_urls(self) -> List[Dict[str, str]]:
+        """
+        Get all URLs and their data from the CSV.
+        
+        Returns:
+            List of dictionaries with URL data
+        """
+        if not os.path.exists(self.csv_path):
+            return []
+        
+        urls_data = []
+        with open(self.csv_path, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                urls_data.append(dict(row))
+        
+        return urls_data
+
+
+class QRCodeGenerator:
+    """Generate QR codes from URLs and manage their data."""
+    
+    def __init__(self, config: Dict[str, Any], csv_processor: CSVProcessor):
+        """
+        Initialize the QRCodeGenerator with configuration and CSV processor.
         
         Args:
             config: Configuration dictionary
+            csv_processor: CSV processor for managing URL data
         """
         self.config = config
+        self.csv_processor = csv_processor
         self.error_correction = getattr(qrcode.constants, 
-                                      config.get('qr_error_correction', 'ERROR_CORRECT_L'))
+                                     config.get('qr_error_correction', 'ERROR_CORRECT_L'))
         self.box_size = config.get('qr_box_size', 10)
         self.border = config.get('qr_border', 4)
     
-    def generate_qr_code(self, url: str, output_path: str, filename: str = "qrcode") -> Dict[str, str]:
+    def generate_binary_data(self, url: str) -> Tuple[int, str]:
         """
-        Generate QR code for a URL and save as image and binary file.
+        Generate binary data for a QR code.
         
         Args:
             url: URL to encode in QR code
-            output_path: Directory to save the QR code files
-            filename: Base filename for output files
             
         Returns:
-            Dictionary containing paths to generated files
+            Tuple of (version, binary_data)
+        """
+        # Create QR code
+        qr = qrcode.QRCode(
+            version=None,  # Auto-determine
+            error_correction=self.error_correction,
+            box_size=self.box_size,
+            border=self.border,
+        )
+        qr.add_data(url)
+        qr.make(fit=True)
+        
+        # Generate binary representation
+        data = qr.get_matrix()
+        binary_data = ""
+        for row in data:
+            for cell in row:
+                binary_data += "1" if cell else "0"
+        
+        return qr.version, binary_data
+    
+    def generate_image(self, url: str, output_path: str, filename: str = "qrcode") -> str:
+        """
+        Generate QR code image for a URL.
+        
+        Args:
+            url: URL to encode in QR code
+            output_path: Directory to save the QR code image
+            filename: Base filename for output file
+            
+        Returns:
+            Path to the generated image
         """
         os.makedirs(output_path, exist_ok=True)
         
@@ -300,202 +418,51 @@ class QRCodeGenerator:
         image_path = os.path.join(output_path, f"{filename}.png")
         img.save(image_path)
         
-        # Save binary data
-        binary_path = os.path.join(output_path, f"{filename}.bin")
-        self._save_binary_data(qr, url, binary_path)
-        
-        # Save URL to markdown file
-        url_path = os.path.join(output_path, "url.md")
-        with open(url_path, 'w', encoding='utf-8') as f:
-            f.write(f"# QR Code Link\n\n{url}\n")
-        
-        return {
-            'image': image_path,
-            'binary': binary_path,
-            'url': url_path
-        }
+        return image_path
     
-    def _save_binary_data(self, qr: qrcode.QRCode, url: str, file_path: str) -> None:
-        """Save QR code data as binary file."""
-        data = qr.get_matrix()
-        binary_data = ""
-        for row in data:
-            for cell in row:
-                binary_data += "1" if cell else "0"
-        
-        additional_info = f"Link: {url}\nVersion: {qr.version}\n"
-        data_file_content = additional_info.encode('utf-8') + binary_data.encode('utf-8')
-        
-        with open(file_path, "wb") as f:
-            f.write(data_file_content)
-
-
-class OutputGenerator:
-    """Generate various output formats from QR codes."""
-    
-    def __init__(self, config: Dict[str, Any]):
+    def process_urls(self, output_dir: str) -> List[Dict[str, str]]:
         """
-        Initialize the OutputGenerator with configuration.
+        Process all URLs in the CSV and generate QR code images.
         
         Args:
-            config: Configuration dictionary
-        """
-        self.config = config
-    
-    def create_powerpoint(self, qr_data: List[Dict[str, Any]], output_path: str) -> Optional[str]:
-        """
-        Create PowerPoint presentation with QR codes and links.
-        
-        Args:
-            qr_data: List of dictionaries containing QR code data
-            output_path: Path to save the PowerPoint file
+            output_dir: Base directory for QR code images
             
         Returns:
-            Path to the created PowerPoint file or None if failed
+            List of dictionaries with URL data and image paths
         """
-        if not PPTX_AVAILABLE:
-            print("python-pptx is not installed. PowerPoint creation skipped.")
-            return None
+        urls_data = self.csv_processor.get_urls()
+        processed_data = []
         
-        if not qr_data:
-            print("No QR codes to include in PowerPoint.")
-            return None
-        
-        try:
-            prs = Presentation()
+        for data in urls_data:
+            url = data['url']
             
-            for data in qr_data:
-                slide = prs.slides.add_slide(prs.slide_layouts[5])  # Blank layout
-                
-                # Add title (URL name/description)
-                title = slide.shapes.add_textbox(
-                    Inches(0.5), Inches(0.5), Inches(9), Inches(1)
-                )
-                title_frame = title.text_frame
-                p = title_frame.add_paragraph()
-                p.text = data.get('title', data['url'])
-                p.font.size = Pt(24)
-                
-                # Add QR code image
-                img_path = data['files']['image']
-                slide.shapes.add_picture(
-                    img_path, Inches(2), Inches(1.5), width=Inches(4)
-                )
-                
-                # Add URL as clickable link
-                link_box = slide.shapes.add_textbox(
-                    Inches(0.5), Inches(6), Inches(9), Inches(1)
-                )
-                link_frame = link_box.text_frame
-                p = link_frame.add_paragraph()
-                r = p.add_run()
-                r.text = data['url']
-                
-                # Try to make it a hyperlink if possible
-                try:
-                    r.hyperlink.address = data['url']
-                except:
-                    pass  # Some versions of python-pptx don't support this
+            # Generate binary data if not already present
+            if not data['binary_data'] or not data['version']:
+                version, binary_data = self.generate_binary_data(url)
+                self.csv_processor.update_qr_data(url, version, binary_data)
             
-            pptx_path = os.path.join(output_path, "qr_codes.pptx")
-            prs.save(pptx_path)
-            return pptx_path
-        
-        except Exception as e:
-            print(f"Error creating PowerPoint: {e}")
-            return None
-    
-    def create_pdf(self, qr_data: List[Dict[str, Any]], output_path: str) -> Optional[str]:
-        """
-        Create PDF with QR codes and links.
-        
-        Args:
-            qr_data: List of dictionaries containing QR code data
-            output_path: Path to save the PDF file
+            # Create directory for this URL
+            dir_name = self.sanitize_filename(url)
+            url_dir = os.path.join(output_dir, dir_name)
             
-        Returns:
-            Path to the created PDF file or None if failed
-        """
-        if not PDF_AVAILABLE:
-            print("fpdf is not installed. PDF creation skipped.")
-            return None
-        
-        if not qr_data:
-            print("No QR codes to include in PDF.")
-            return None
-        
-        try:
-            pdf = FPDF()
+            # Generate image
+            image_path = self.generate_image(url, url_dir)
             
-            for data in qr_data:
-                pdf.add_page()
-                
-                # Add title
-                pdf.set_font("Arial", "B", 16)
-                title = data.get('title', data['url'])
-                pdf.cell(0, 10, title, ln=True, align='C')
-                
-                # Add QR code image
-                img_path = data['files']['image']
-                pdf.image(img_path, x=70, y=50, w=70)
-                
-                # Add URL as text
-                pdf.set_font("Arial", "", 12)
-                pdf.set_y(130)  # Position below the QR code
-                pdf.cell(0, 10, data['url'], ln=True, align='C', link=data['url'])
+            # Save URL to markdown file
+            url_path = os.path.join(url_dir, "url.md")
+            with open(url_path, 'w', encoding='utf-8') as f:
+                f.write(f"# QR Code Link\n\n{url}\n")
             
-            pdf_path = os.path.join(output_path, "qr_codes.pdf")
-            pdf.output(pdf_path)
-            return pdf_path
+            processed_data.append({
+                'url': url,
+                'directory': url_dir,
+                'image_path': image_path,
+                'url_file': url_path,
+                'timestamp': data['timestamp'],
+                'version': data['version']
+            })
         
-        except Exception as e:
-            print(f"Error creating PDF: {e}")
-            return None
-
-
-class LinkProcessorApp:
-    """Main application class for processing links and generating outputs."""
-    
-    def __init__(self, config_path: Optional[str] = None, config: Optional[Dict[str, Any]] = None):
-        """
-        Initialize the application with optional configuration file or dictionary.
-        
-        Args:
-            config_path: Path to configuration YAML file
-            config: Configuration dictionary (overrides config_path if provided)
-        """
-        if config:
-            self.config = config
-        else:
-            self.config = self._load_config(config_path)
-        
-        self.link_extractor = LinkExtractor(self.config)
-        self.qr_generator = QRCodeGenerator(self.config)
-        self.output_generator = OutputGenerator(self.config)
-    
-    def _load_config(self, config_path: Optional[str]) -> Dict[str, Any]:
-        """Load configuration from YAML file or use defaults."""
-        default_config = {
-            'output_pptx': True,
-            'output_pdf': True,
-            'output_raw': True,
-            'qr_error_correction': 'ERROR_CORRECT_L',
-            'qr_box_size': 10,
-            'qr_border': 4,
-            'generate_descriptive_titles': True
-        }
-        
-        if config_path and os.path.exists(config_path):
-            try:
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    user_config = yaml.safe_load(f)
-                if user_config:
-                    default_config.update(user_config)
-            except Exception as e:
-                print(f"Error loading config from {config_path}: {e}")
-                print("Using default configuration.")
-        
-        return default_config
+        return processed_data
     
     def sanitize_filename(self, url: str) -> str:
         """
@@ -532,40 +499,138 @@ class LinkProcessorApp:
             name = f"url_{uuid.uuid4().hex[:8]}"
             
         return name
+
+
+class PDFGenerator:
+    """Generate PDF with QR codes, 4 codes per page."""
     
-    def generate_title(self, url: str) -> str:
+    def __init__(self, config: Dict[str, Any]):
         """
-        Generate a descriptive title for a URL.
+        Initialize the PDF generator with configuration.
         
         Args:
-            url: URL to generate title for
+            config: Configuration dictionary
+        """
+        self.config = config
+    
+    def create_pdf(self, qr_data: List[Dict[str, Any]], output_path: str) -> Optional[str]:
+        """
+        Create PDF with QR codes, 4 per page.
+        
+        Args:
+            qr_data: List of dictionaries containing QR code data
+            output_path: Path to save the PDF file
             
         Returns:
-            Generated title
+            Path to the created PDF file or None if failed
         """
-        if not self.config.get('generate_descriptive_titles', True):
-            return url
+        if not PDF_AVAILABLE:
+            print("fpdf is not installed. PDF creation skipped.")
+            return None
         
-        # Extract domain and path components
-        parsed_url = urlparse(url)
-        domain = parsed_url.netloc.replace('www.', '')
+        if not qr_data:
+            print("No QR codes to include in PDF.")
+            return None
         
-        path_parts = [p for p in parsed_url.path.split('/') if p]
+        try:
+            pdf = FPDF()
+            pdf.set_auto_page_break(auto=True, margin=15)
+            
+            # Process 4 QR codes per page
+            for i in range(0, len(qr_data), 4):
+                pdf.add_page()
+                
+                # Get batch of up to 4 codes
+                batch = qr_data[i:i+4]
+                
+                for j, data in enumerate(batch):
+                    # Calculate position (2x2 grid)
+                    row = j // 2
+                    col = j % 2
+                    
+                    x = 30 + col * 85  # Horizontal spacing
+                    y = 30 + row * 120  # Vertical spacing
+                    
+                    # Add URL as title
+                    pdf.set_font("Arial", "B", 10)
+                    pdf.set_xy(x, y)
+                    url = data['url']
+                    # Truncate URL if too long
+                    if len(url) > 40:
+                        display_url = url[:37] + "..."
+                    else:
+                        display_url = url
+                    pdf.cell(70, 10, display_url, ln=True, align='C')
+                    
+                    # Add QR code image
+                    pdf.image(data['image_path'], x + 15, y + 15, w=40)
+                    
+                    # Add timestamp
+                    pdf.set_font("Arial", "", 8)
+                    pdf.set_xy(x, y + 60)
+                    timestamp = data.get('timestamp', '')
+                    try:
+                        # Format timestamp nicely if possible
+                        dt = datetime.datetime.fromisoformat(timestamp)
+                        formatted_time = dt.strftime("%Y-%m-%d %H:%M:%S")
+                    except:
+                        formatted_time = timestamp
+                    pdf.cell(70, 5, f"Generated: {formatted_time}", ln=True, align='C')
+                    
+                    # Add version
+                    pdf.set_xy(x, y + 65)
+                    version = data.get('version', '')
+                    pdf.cell(70, 5, f"Version: {version}", ln=True, align='C')
+            
+            pdf_path = os.path.join(output_path, "qr_codes.pdf")
+            pdf.output(pdf_path)
+            return pdf_path
         
-        # Format title
-        if not path_parts:
-            return domain
+        except Exception as e:
+            print(f"Error creating PDF: {e}")
+            return None
+
+
+class LinkProcessorApp:
+    """Main application class for processing links and generating outputs."""
+    
+    def __init__(self, config_path: Optional[str] = None, config: Optional[Dict[str, Any]] = None):
+        """
+        Initialize the application with optional configuration file or dictionary.
         
-        # Use last meaningful path component as title
-        slug = path_parts[-1].replace('-', ' ').replace('_', ' ')
+        Args:
+            config_path: Path to configuration YAML file
+            config: Configuration dictionary (overrides config_path if provided)
+        """
+        if config:
+            self.config = config
+        else:
+            self.config = self._load_config(config_path)
         
-        # Clean up the slug
-        slug = re.sub(r'\.\w+$', '', slug)  # Remove file extensions
+        self.link_extractor = LinkExtractor(self.config)
+    
+    def _load_config(self, config_path: Optional[str]) -> Dict[str, Any]:
+        """Load configuration from YAML file or use defaults."""
+        default_config = {
+            'output_pdf': True,
+            'output_raw': True,
+            'qr_error_correction': 'ERROR_CORRECT_L',
+            'qr_box_size': 10,
+            'qr_border': 4,
+            'generate_descriptive_titles': True
+        }
         
-        if not slug:
-            return domain
+        if config_path and os.path.exists(config_path):
+            try:
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    user_config = yaml.safe_load(f)
+                if user_config:
+                    default_config.update(user_config)
+            except Exception as e:
+                print(f"Error loading config from {config_path}: {e}")
+                print("Using default configuration.")
         
-        return f"{slug.title()} - {domain}"
+        return default_config
     
     def process_file(self, input_file: str, output_dir: str = "output") -> Dict[str, Any]:
         """
@@ -591,53 +656,46 @@ class LinkProcessorApp:
         links = self.link_extractor.extract_from_file(input_file)
         print(f"Found {len(links)} unique links")
         
-        # Process each link
-        qr_data = []
-        for url in links:
-            # Create sanitized directory name
-            dir_name = self.sanitize_filename(url)
-            url_dir = os.path.join(file_output_dir, dir_name)
-            
-            # Generate QR code
-            files = self.qr_generator.generate_qr_code(url, url_dir)
-            
-            # Generate title
-            title = self.generate_title(url)
-            
-            qr_data.append({
-                'url': url,
-                'title': title,
-                'directory': url_dir,
-                'files': files
-            })
+        # Create CSV processor
+        csv_processor = CSVProcessor(file_output_dir)
         
-        # Generate outputs if configured and links exist
-        results = {
+        # Add links to CSV
+        new_links = csv_processor.add_urls(links)
+        print(f"Added {len(new_links)} new unique links to CSV")
+        
+        # Create QR code generator
+        qr_generator = QRCodeGenerator(self.config, csv_processor)
+        
+        # Process URLs and generate images
+        processed_data = qr_generator.process_urls(file_output_dir)
+        print(f"Generated {len(processed_data)} QR codes")
+        
+        # Generate PDF if configured
+        pdf_path = None
+        if self.config.get('output_pdf', True):
+            pdf_generator = PDFGenerator(self.config)
+            pdf_path = pdf_generator.create_pdf(processed_data, file_output_dir)
+            if pdf_path:
+                print(f"Created PDF with QR codes: {pdf_path}")
+        
+        # Return results
+        return {
             'input_file': input_file,
             'output_dir': file_output_dir,
             'links_found': len(links),
-            'qr_data': qr_data,
-            'outputs': {}
+            'new_links': len(new_links),
+            'qr_data': processed_data,
+            'outputs': {
+                'csv': csv_processor.csv_path,
+                'pdf': pdf_path
+            }
         }
-        
-        if qr_data:
-            if self.config.get('output_pptx', True):
-                pptx_path = self.output_generator.create_powerpoint(qr_data, file_output_dir)
-                if pptx_path:
-                    results['outputs']['pptx'] = pptx_path
-            
-            if self.config.get('output_pdf', True):
-                pdf_path = self.output_generator.create_pdf(qr_data, file_output_dir)
-                if pdf_path:
-                    results['outputs']['pdf'] = pdf_path
-        
-        return results
 
 
 def main():
     """Main entry point for the command line interface."""
     parser = argparse.ArgumentParser(
-        description="Extract links from files and generate QR codes and presentations."
+        description="Extract links from files, store in CSV, and generate QR codes."
     )
     parser.add_argument(
         "input_file", 
@@ -670,10 +728,14 @@ def main():
     print("\nProcessing complete!")
     print(f"Processed file: {result['input_file']}")
     print(f"Found {result['links_found']} unique links")
-    print(f"Created QR codes in: {result['output_dir']}")
+    print(f"Added {result['new_links']} new links to CSV")
+    print(f"Output saved to: {result['output_dir']}")
     
-    for output_type, path in result['outputs'].items():
-        print(f"Generated {output_type.upper()}: {path}")
+    if result['outputs']['csv']:
+        print(f"CSV file created: {result['outputs']['csv']}")
+    
+    if result['outputs']['pdf']:
+        print(f"PDF created: {result['outputs']['pdf']}")
     
     return 0
 

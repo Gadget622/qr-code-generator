@@ -2,3 +2,4 @@
 qrcodes/
 output/
 __pycache__/
+.archive
