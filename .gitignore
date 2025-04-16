@@ -3,3 +3,4 @@ qrcodes/
 output/
 __pycache__/
 .archive
+.links/
